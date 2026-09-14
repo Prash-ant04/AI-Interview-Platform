@@ -1,6 +1,8 @@
 // Application State Management
 class InterviewApp {
     constructor() {
+        this.apiBaseUrl = window.API_BASE_URL ||'https://ai-interview-platform-axe9.onrender.com' ||'http://127.0.0.1:8000';
+        this.authToken = null;
         this.currentPage = 'landing-page';
         this.currentQuestionIndex = 0;
         this.interviewData = {
@@ -283,6 +285,29 @@ class InterviewApp {
         }
     }
 
+    async getAuthToken() {
+        if (this.authToken) return this.authToken;
+
+        const guestEmail = `guest-${crypto.randomUUID()}@example.com`;
+        const response = await fetch(`${this.apiBaseUrl}/api/auth/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: 'Guest Candidate',
+                email: guestEmail,
+                password: crypto.randomUUID()
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`Authentication failed (${response.status})`);
+        }
+
+        const data = await response.json();
+        this.authToken = data.token;
+        return this.authToken;
+    }
+
     initSpeechRecognition() {
         if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -353,7 +378,7 @@ class InterviewApp {
         this.stopRecording();
     }
 
-    startInterview() {
+    async startInterview() {
         console.log('Starting interview...');
         this.interviewData.startTime = new Date();
         
@@ -361,6 +386,28 @@ class InterviewApp {
         this.interviewData.questions = typeQuestions.slice(0, this.interviewData.questionCount);
         this.interviewData.responses = new Array(this.interviewData.questionCount).fill('');
         this.currentQuestionIndex = 0;
+
+        try {
+            const token = await this.getAuthToken();
+            const response = await fetch(`${this.apiBaseUrl}/api/interview/setup`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    interview_type: this.interviewData.type,
+                    question_count: this.interviewData.questionCount,
+                    custom_questions: this.interviewData.questions
+                })
+            });
+
+            if (!response.ok) throw new Error(`Interview setup failed (${response.status})`);
+            const data = await response.json();
+            this.interviewData.sessionId = data.session_id;
+        } catch (error) {
+            console.warn('Backend setup unavailable; continuing with local interview.', error);
+        }
 
         this.navigateToPage('interview-page');
         
@@ -570,15 +617,58 @@ class InterviewApp {
         this.navigateToPage('results-page');
     }
 
-    generateResults() {
-        const responses = this.interviewData.responses.filter(r => r && r !== 'Question skipped by candidate.');
-        const analysis = this.generateMockAnalysis(responses);
-        
-        this.interviewData.analysis = analysis;
-        
-        setTimeout(() => {
-            this.displayResults();
-        }, 300);
+    async generateResults() {
+        const token = this.authToken;
+        const responses = this.interviewData.responses.map(r => r || 'Question skipped by candidate.');
+        const overallScoreEl = document.getElementById('overall-score');
+        const feedbackContent = document.getElementById('ai-feedback-content');
+
+        if (overallScoreEl) overallScoreEl.textContent = '...';
+        if (feedbackContent) {
+            feedbackContent.innerHTML = '<h4>Analyzing your responses with Gemini AI... Please wait.</h4>';
+        }
+
+        try {
+            if (!token || !this.interviewData.sessionId) {
+                throw new Error('No authenticated interview session is available.');
+            }
+
+            const res = await fetch(`${this.apiBaseUrl}/api/interview/complete`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    session_id: this.interviewData.sessionId,
+                    responses
+                })
+            });
+
+            if (!res.ok) throw new Error(`AI analysis failed (${res.status})`);
+            const data = await res.json();
+            const totalWords = responses.join(' ').split(/\s+/).filter(Boolean).length;
+            const score = Math.max(0, Math.min(100, Number(data.score) || 0));
+
+            this.interviewData.analysis = {
+                overallScore: score,
+                clarity: score,
+                relevance: Math.min(100, score + 5),
+                tone: Math.min(100, score + 2),
+                strengths: data.feedback?.strengths || [],
+                improvements: data.feedback?.improvements || [],
+                suggestions: data.feedback?.suggestions || [],
+                duration: Math.round((new Date() - this.interviewData.startTime) / 1000 / 60),
+                totalWords,
+                answeredQuestions: responses.filter(r => r !== 'Question skipped by candidate.').length
+            };
+        } catch (error) {
+            console.error('AI Analysis failed', error);
+            alert('Failed to reach AI. Falling back to local analysis.');
+            this.interviewData.analysis = this.generateMockAnalysis(responses);
+        }
+
+        this.displayResults();
     }
 
     generateMockAnalysis(responses) {

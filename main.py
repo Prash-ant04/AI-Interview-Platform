@@ -27,7 +27,9 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify your frontend URL
+    allow_origins=["https://ai-interview-platform-frontend-m64b.onrender.com",
+                   "http://localhost:3000",
+        "http://127.0.0.1:8000"],  # In production, specify your frontend URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -107,6 +109,7 @@ class InterviewResponse(BaseModel):
 
 class InterviewCompletion(BaseModel):
     session_id: str
+    responses: Optional[List[str]] = None
 
 # Helper functions
 def hash_password(password: str) -> str:
@@ -276,14 +279,19 @@ async def complete_interview(completion: InterviewCompletion, current_user: dict
             raise HTTPException(status_code=404, detail="Interview session not found")
 
         questions = json.loads(result[0])
-        responses = json.loads(result[1]) if result[1] else []
+        responses = completion.responses or (json.loads(result[1]) if result[1] else [])
+
+        cursor.execute(
+            "UPDATE interview_sessions SET responses = ? WHERE id = ? AND user_id = ?",
+            (json.dumps(responses), completion.session_id, current_user["user_id"])
+        )
 
         # Generate AI feedback using Gemini
         feedback_prompt = f"""
         Please analyze this interview performance and provide constructive feedback:
 
         Questions and Responses:
-        {json.dumps([{"question": q, "response": r.get("response_text", "")} for q, r in zip(questions, responses)], indent=2)}
+        {json.dumps([{"question": q, "response": r if isinstance(r, str) else r.get("response_text", "")} for q, r in zip(questions, responses)], indent=2)}
 
         Please provide:
         1. Overall assessment (2-3 sentences)
